@@ -1,0 +1,44 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'uk.co.abgroup.siteaudit'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'uk.co.abgroup.siteaudit'
+        minSdk 29          // Android 10 and later
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    // One fixed signing key, so every new build installs over the old one and keeps your audits.
+    signingConfigs {
+        release {
+            storeFile file('siteaudit.keystore')
+            storePassword 'ABsiteAudit2026'
+            keyAlias 'siteaudit'
+            keyPassword 'ABsiteAudit2026'
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.core:core:1.13.1'
+}
