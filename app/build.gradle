@@ -10,8 +10,9 @@ android {
         applicationId 'uk.co.abgroup.siteaudit'
         minSdk 29          // Android 10 and later
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        // build number from GitHub, so every new APK installs as an update
+        versionCode((System.getenv('GITHUB_RUN_NUMBER') ?: '1') as Integer)
+        versionName "1.0.${System.getenv('GITHUB_RUN_NUMBER') ?: '0'}"
     }
 
     // One fixed signing key, so every new build installs over the old one and keeps your audits.

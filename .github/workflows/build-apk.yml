@@ -2,7 +2,11 @@ name: Build APK
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -21,9 +25,28 @@ jobs:
           ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk "AB-Site-Audit.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk AB-Site-Audit.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: AB-Site-Audit-APK
           path: AB-Site-Audit.apk
+
+      - name: Publish APK on the Releases page
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" AB-Site-Audit.apk \
+            --title "AB Site Audit – build ${{ github.run_number }}" \
+            --notes "Download AB-Site-Audit.apk below and tap it on your phone to install or update." \
+            --latest
+
+      - name: Keep a copy of the APK in the apk branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout --orphan apk
+          git rm -r -q --cached .
+          git add -f AB-Site-Audit.apk
+          git commit -q -m "APK build ${{ github.run_number }}"
+          git push -f -q origin apk
