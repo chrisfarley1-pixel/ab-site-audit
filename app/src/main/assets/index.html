@@ -645,7 +645,7 @@ const Cam={stream:null,track:null,ic:null,t:null,n:0,q:Promise.resolve(),icBusy:
     $('#camTitle').textContent=lbl+(t.kind==='site'?'':' – tap for each photo');
     $('#cam').hidden=false;this.isOpen=true;pushHist('cam');
   },
-  frame(){const v=$('#camV');if(window.createImageBitmap)return createImageBitmap(v).catch(()=>this.frameJpeg());return this.frameJpeg();},
+  frame(){const v=$('#camV');if(!v.videoWidth)return Promise.resolve(null);if(window.createImageBitmap)return createImageBitmap(v).catch(()=>this.frameJpeg());return this.frameJpeg();},
   frameJpeg(){const v=$('#camV');const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);return new Promise(r=>c.toBlob(r,'image/jpeg',0.95));},
   take(){const ps=this.ps;return (ps?this.ic.takePhoto(ps).catch(()=>{this.ps=undefined;return this.ic.takePhoto();}):this.ic.takePhoto());},
   shoot(){
@@ -656,6 +656,7 @@ const Cam={stream:null,track:null,ic:null,t:null,n:0,q:Promise.resolve(),icBusy:
     if(this.ic&&!this.icBusy){this.icBusy=true;p=this.take().catch(()=>this.frame()).finally(()=>{this.icBusy=false;});}
     else p=this.frame();
     const t=this.t;this.n++;
+    this.inflight=this.inflight||new Set();this.inflight.add(p);p.catch(()=>{}).finally(()=>this.inflight.delete(p));
     $('#camBadge').hidden=false;$('#camBadge').textContent=this.n;
     this.q=Saves.add(t.id,async()=>{
       const src=await p;if(!src)return;const isBlob=src instanceof Blob;
@@ -664,13 +665,15 @@ const Cam={stream:null,track:null,ic:null,t:null,n:0,q:Promise.resolve(),icBusy:
       if(S.settings.autoSave){const n=photoName(id);if(n){if(isBlob)downloadBlob(src,n);else{const ph=await Store.get('photos',id);if(ph)downloadBlob(ph.blob,n);}}}
       if(!this.isOpen){if(S.issue)renderSheet();else render();}
     });
-    if(t.kind==='site')this.finish();
+    if(t.kind==='site')p.catch(()=>{}).finally(()=>this.finish());
   },
-  async finish(){ // Done pressed: wait for saves, then close via history so Back works the same way
+  async finish(){ // Done pressed: let any picture still being taken finish, then close via history so Back works the same way
     if(!this.isOpen||this.closing)return;this.closing=true;
+    if(this.inflight&&this.inflight.size){busy('Taking photo…');await Promise.allSettled([...this.inflight]);busy(false);}
     goBack(); // photos keep saving in the background
   },
   closeNow(){ // called from handleBack
+    if(this.inflight&&this.inflight.size&&!this.closing){const pend=[...this.inflight];this.closing=true;Promise.allSettled(pend).then(()=>this.closeNow());return;}
     this.isOpen=false;this.closing=false;this.stop();$('#cam').hidden=true;
     const n=this.n;if(S.issue)renderSheet();else render();this.q.then(()=>{if(n)toast(`${n} photo${n===1?'':'s'} added`);if(S.issue)renderSheet();else render();});
   },
