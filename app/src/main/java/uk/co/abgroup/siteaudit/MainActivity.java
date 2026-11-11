@@ -2,15 +2,22 @@ package uk.co.abgroup.siteaudit;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.UriPermission;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -33,6 +40,7 @@ import androidx.webkit.WebViewAssetLoader;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
@@ -53,6 +61,10 @@ public class MainActivity extends Activity {
     private static final int REQ_PERM_CAMERA_WEB = 2;
     private static final int REQ_PERM_CAMERA_INTENT = 3;
     private static final int REQ_PERM_AUDIO = 4;
+    private static final int REQ_TREE = 5;
+    private static final String PREFS = "absiteaudit";
+    private static final String KEY_TREE = "backupTree";
+    private static final String DEFAULT_PLACE = "Downloads \u203a AB Site Audit \u203a Backups";
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -67,6 +79,11 @@ public class MainActivity extends Activity {
     // one file save at a time, written in chunks from JavaScript
     private OutputStream saveOut;
     private Uri saveUri;
+    // 0 = Downloads / Pictures, 1 = chosen backup folder, 2 = app cache (for sharing), 3 = backup in Downloads
+    private int saveMode = 0;
+    private String saveName;
+    private final List<Uri> saveOld = new ArrayList<>();
+    private String lastPlace = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -207,6 +224,27 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_TREE) {
+            String name = "";
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                try {
+                    Uri tree = data.getData();
+                    int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+                    getContentResolver().takePersistableUriPermission(tree, flags);
+                    Uri old = backupTree();
+                    if (old != null && !old.equals(tree)) {
+                        try { getContentResolver().releasePersistableUriPermission(old, flags); } catch (Exception ignored) { }
+                    }
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_TREE, tree.toString()).apply();
+                    name = treeName(tree);
+                } catch (Exception e) {
+                    toast("That folder cannot be used for backups");
+                }
+            }
+            final String js = "window.__abBackupFolder&&window.__abBackupFolder(" + JSONObject.quote(name) + ")";
+            web.evaluateJavascript(js, null);
+            return;
+        }
         if (requestCode != REQ_FILE || fileCallback == null) return;
         Uri[] result = null;
         if (resultCode == RESULT_OK) {
@@ -256,6 +294,63 @@ public class MainActivity extends Activity {
 
     private void toast(String msg) {
         runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show());
+    }
+
+    // ---------------------------------------------------------------- backup folder
+
+    /** The backup folder the user chose, or null if none is set or access to it has gone. */
+    private Uri backupTree() {
+        String v = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE, null);
+        if (v == null) return null;
+        Uri tree = Uri.parse(v);
+        for (UriPermission p : getContentResolver().getPersistedUriPermissions()) {
+            if (p.getUri().equals(tree) && p.isWritePermission()) return tree;
+        }
+        return null;
+    }
+
+    private String treeName(Uri tree) {
+        try {
+            String id = DocumentsContract.getTreeDocumentId(tree);
+            int c = id.indexOf(':');
+            if (c >= 0) {
+                String vol = id.substring(0, c), path = id.substring(c + 1);
+                String root = "primary".equals(vol) ? "Phone storage" : vol;
+                return path.isEmpty() ? root : root + " \u203a " + path.replace("/", " \u203a ");
+            }
+            return id;
+        } catch (Exception e) {
+            return "Chosen folder";
+        }
+    }
+
+    private void startTreeSave(Uri tree, String name) throws Exception {
+        ContentResolver cr = getContentResolver();
+        String rootId = DocumentsContract.getTreeDocumentId(tree);
+        Uri parent = DocumentsContract.buildDocumentUriUsingTree(tree, rootId);
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, rootId);
+        String part = name + ".part";
+        saveOld.clear();
+        Cursor c = cr.query(children, new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null);
+        if (c != null) {
+            try {
+                while (c.moveToNext()) {
+                    String id = c.getString(0), dn = c.getString(1);
+                    if (name.equals(dn)) {
+                        saveOld.add(DocumentsContract.buildDocumentUriUsingTree(tree, id));
+                    } else if (part.equals(dn)) {
+                        try { DocumentsContract.deleteDocument(cr, DocumentsContract.buildDocumentUriUsingTree(tree, id)); } catch (Exception ignored) { }
+                    }
+                }
+            } finally {
+                c.close();
+            }
+        }
+        saveUri = DocumentsContract.createDocument(cr, parent, "application/octet-stream", part);
+        if (saveUri == null) throw new Exception("could not create the file");
+        saveOut = cr.openOutputStream(saveUri);
+        if (saveOut == null) throw new Exception("could not open the file");
     }
 
     // ---------------------------------------------------------------- voice typing
@@ -342,13 +437,103 @@ public class MainActivity extends Activity {
         public boolean isNative() { return true; }
 
         @JavascriptInterface
-        public String version() { return "1.0"; }
+        public String version() { return "1.1"; }
+
+        /** Opens the phone's folder picker so the user can choose where backups are saved. */
+        @JavascriptInterface
+        public void pickBackupFolder() {
+            runOnUiThread(() -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    startActivityForResult(i, REQ_TREE);
+                } catch (Exception e) {
+                    toast("No folder picker available on this phone");
+                }
+            });
+        }
+
+        /** Name of the chosen backup folder, or "" when the default (Downloads) is in use. */
+        @JavascriptInterface
+        public String backupFolder() {
+            try {
+                Uri t = backupTree();
+                return t == null ? "" : treeName(t);
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public void clearBackupFolder() {
+            try {
+                Uri t = backupTree();
+                if (t != null) {
+                    getContentResolver().releasePersistableUriPermission(t,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                }
+            } catch (Exception ignored) { }
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_TREE).apply();
+        }
+
+        /** Where the last backup was written, in words. */
+        @JavascriptInterface
+        public String lastSavePlace() { return lastPlace; }
 
         /** Start saving a file. kind "photo" goes to Pictures/AB Site Audit (shows in Gallery), anything else to Downloads/AB Site Audit. */
         @JavascriptInterface
         public synchronized String saveStart(String name, String mime, String kind) {
             try {
                 closeQuietly();
+                saveMode = 0;
+                saveName = name;
+                saveOld.clear();
+                if ("share".equals(kind)) {
+                    File dir = new File(getCacheDir(), "share");
+                    //noinspection ResultOfMethodCallIgnored
+                    dir.mkdirs();
+                    File[] old = dir.listFiles();
+                    if (old != null) for (File o : old) { //noinspection ResultOfMethodCallIgnored
+                        o.delete(); }
+                    File f = new File(dir, name);
+                    saveUri = FileProvider.getUriForFile(MainActivity.this, getPackageName() + ".files", f);
+                    saveOut = new FileOutputStream(f);
+                    saveMode = 2;
+                    return "ok";
+                }
+                boolean backup = "backup".equals(kind);
+                if (backup) {
+                    Uri tree = backupTree();
+                    if (tree != null) {
+                        try {
+                            startTreeSave(tree, name);
+                            saveMode = 1;
+                            lastPlace = treeName(tree);
+                            return "ok";
+                        } catch (Exception e) {
+                            closeQuietly();
+                            lastPlace = DEFAULT_PLACE + " (the chosen folder could not be used)";
+                        }
+                    } else {
+                        lastPlace = DEFAULT_PLACE;
+                    }
+                    saveMode = 3;
+                    // earlier copies of this backup that this app wrote, removed once the new one is complete
+                    try {
+                        Uri col = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+                        Cursor c = getContentResolver().query(col, new String[]{MediaStore.MediaColumns._ID},
+                                MediaStore.MediaColumns.DISPLAY_NAME + "=? AND " + MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?",
+                                new String[]{name, "%" + FOLDER + "/Backups%"}, null);
+                        if (c != null) {
+                            try {
+                                while (c.moveToNext()) saveOld.add(ContentUris.withAppendedId(col, c.getLong(0)));
+                            } finally {
+                                c.close();
+                            }
+                        }
+                    } catch (Exception ignored) { }
+                }
                 ContentValues cv = new ContentValues();
                 cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
                 cv.put(MediaStore.MediaColumns.MIME_TYPE, mime);
@@ -358,7 +543,7 @@ public class MainActivity extends Activity {
                     cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/" + FOLDER);
                     collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
                 } else {
-                    cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/" + FOLDER);
+                    cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/" + FOLDER + (backup ? "/Backups" : ""));
                     collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
                 }
                 saveUri = getContentResolver().insert(collection, cv);
@@ -389,9 +574,38 @@ public class MainActivity extends Activity {
                 saveOut.flush();
                 saveOut.close();
                 saveOut = null;
+                ContentResolver cr = getContentResolver();
+                if (saveMode == 2) {
+                    String u = saveUri.toString();
+                    saveUri = null;
+                    return u;
+                }
+                if (saveMode == 1) {
+                    // the new backup is complete: remove the previous copy, then give the new one its proper name
+                    for (Uri o : saveOld) {
+                        try { DocumentsContract.deleteDocument(cr, o); } catch (Exception ignored) { }
+                    }
+                    saveOld.clear();
+                    Uri renamed = null;
+                    try { renamed = DocumentsContract.renameDocument(cr, saveUri, saveName); } catch (Exception ignored) { }
+                    String u = (renamed != null ? renamed : saveUri).toString();
+                    saveUri = null;
+                    return u;
+                }
                 ContentValues cv = new ContentValues();
                 cv.put(MediaStore.MediaColumns.IS_PENDING, 0);
-                getContentResolver().update(saveUri, cv, null, null);
+                cr.update(saveUri, cv, null, null);
+                if (saveMode == 3 && !saveOld.isEmpty()) {
+                    for (Uri o : saveOld) {
+                        try { cr.delete(o, null, null); } catch (Exception ignored) { }
+                    }
+                    saveOld.clear();
+                    try {
+                        ContentValues nm = new ContentValues();
+                        nm.put(MediaStore.MediaColumns.DISPLAY_NAME, saveName);
+                        cr.update(saveUri, nm, null, null);
+                    } catch (Exception ignored) { }
+                }
                 String u = saveUri.toString();
                 saveUri = null;
                 return u;
@@ -422,6 +636,7 @@ public class MainActivity extends Activity {
                     i.setType(mime);
                     i.putExtra(Intent.EXTRA_STREAM, Uri.parse(uri));
                     i.putExtra(Intent.EXTRA_SUBJECT, title);
+                    i.setClipData(ClipData.newRawUri(title, Uri.parse(uri)));
                     i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     startActivity(Intent.createChooser(i, "Share"));
                 } catch (Exception e) {
